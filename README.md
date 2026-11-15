@@ -23,6 +23,7 @@ This integration uses the HondaLink Android app API flow, observed while debuggi
 - Buttons for engine start, engine stop, horn, lights, stop horn/lights, and refresh
 - Device tracker from vehicle GPS data when returned by the HondaLink API
 - Configurable lock and unlock command codes for vehicles or markets that use alternate CIG command names
+- Clarity Plug-In Hybrid (`TelematicsPlatform` `2ZSPHEV`): battery level, EV, gas and total range, cabin and outside temperature, plugged in, charging, climate and ignition status (see [Clarity Plug-In Hybrid](#clarity-plug-in-hybrid))
 
 ## Status
 
@@ -77,7 +78,7 @@ The integration currently follows this sequence:
 1. Register app client with HIDAS.
 2. Generate a HIDAS bearer token.
 3. Discover vehicles from `GET /REST/NGT/MyVehicle/1.0`.
-4. Poll latest vehicle state from `POST /REST/NGT/CIG/dbd/latest/{VIN}`.
+4. Poll latest vehicle state from `POST /REST/NGT/CIG/dbd/latest/{VIN}`. Clarity vehicles get the body `{"evInfoRequest": {"reqType": "all_info", "setUnit": {...}}}` instead of `{"fromDate": "", "toDate": ""}`.
 5. Send remote CIG commands through `POST /REST/NGT/CIG/{engine}/async/{command}`.
 6. Poll command results from `GET /REST/NGT/CIG/{engine}/results/{request_id}`.
 
@@ -93,6 +94,17 @@ client_reg_key=<client_reg_key>
 ```
 
 Earlier app-debugging notes may mention `email` and `device_description`, but those fields are not the confirmed working request shape for the live endpoint.
+
+## Clarity Plug-In Hybrid
+
+Vehicles reporting `TelematicsPlatform` `2ZSPHEV` (2018-2021 Clarity Plug-In Hybrid) use the same dashboard endpoint with the EV request the HondaLink app sends for them. Confirmed on a 2021 Clarity. The integration creates:
+
+- Sensors: battery level, EV range, gas range, total range, cabin temperature, outside temperature, last update
+- Binary sensors: plugged in, charging (with the charge schedule as attributes), climate on, ignition on
+- A device tracker, only if Honda reports a position in the dashboard data
+- A Refresh button, which re-reads the latest data without waking the vehicle
+
+Remote climate, charging control and live refresh are not available yet: for these vehicles the app sends them through Honda's older GTC backend. See `docs/clarity-protocol.md`. Lock, engine and horn/lights entities are not created, as these vehicles do not support them. Honda stopped reporting fuel level, mileage, oil life and warning lamps for 2018-2021 Clarity vehicles in March 2026.
 
 ## Options
 
@@ -123,6 +135,20 @@ Confirm that the same email, password, and remote PIN work in the HondaLink mobi
 
 Enter the VIN manually in the setup form. The integration will still try to fetch vehicle details by VIN after login.
 
+### Vehicle not supported (HTTP 400, `0001-01-1151`)
+
+Login and vehicle discovery work, but Honda's dashboard API rejects both the standard and the EV (Clarity) dashboard request. The gateway answers `0001-01-1151` when the request does not match the vehicle's telematics platform. The integration tries both request types once; if both fail, setup stops with a clear message instead of retrying forever.
+
+Support depends on the vehicle's `TelematicsPlatform`, not its model year: a 2025 CR-V reports `MY21`, a 2024 Accord Hybrid `MY23`, and a 2021 Clarity Plug-In Hybrid `2ZSPHEV`.
+
+To help add support, run the read-only probe and attach its output to [issue #4](https://github.com/daviddelahoz/ha-hondalink/issues/4):
+
+```text
+python3 tools/hondalink_platform_probe.py
+```
+
+It prints your vehicle's `TelematicsPlatform`, the HondaLink features enabled for it, and how the dashboard endpoint responds. It sends no remote commands. `tools/hondalink_clarity_probe.py` does the same for the Clarity requests.
+
 ## Security
 
 - This integration stores your HondaLink email, password, and remote PIN in the Home Assistant config entry so it can re-authenticate after token expiry.
@@ -138,6 +164,8 @@ Enter the VIN manually in the setup form. The integration will still try to fetc
 ## Known Limitations
 
 - Tested against a MY21 telematics HondaLink flow.
+- Clarity Plug-In Hybrid: status only so far; remote commands are not implemented. See [Clarity Plug-In Hybrid](#clarity-plug-in-hybrid).
+- Support depends on the vehicle's `TelematicsPlatform`, not its model year; see the troubleshooting section above.
 - EV fields are exposed only when the Honda dashboard payload returns actual values.
 - Lock and unlock command behavior may vary by vehicle, subscription, market, or Honda API changes.
 - HondaLink is a private cloud API; reliability depends on Honda's service and endpoint compatibility.

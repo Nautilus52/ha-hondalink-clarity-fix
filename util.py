@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -273,6 +273,85 @@ def _attribute_safe_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_attribute_safe_value(item) for item in value[:10]]
     return str(value)
+
+
+def ev_info(body: dict[str, Any]) -> dict[str, Any]:
+    """responseBody.evStatus.vehicleInfo from the EV (Clarity) dashboard, or {}."""
+    info = get_path(body, "evStatus.vehicleInfo")
+    return info if isinstance(info, dict) else {}
+
+
+def has_ev_info(body: dict[str, Any]) -> bool:
+    return bool(ev_info(body))
+
+
+def _ev_node_valid(node: dict[str, Any]) -> bool:
+    valid = node.get("valid", node.get("isvalid", True))
+    return str(valid).strip().lower() not in ("false", "0", "no", "")
+
+
+def ev_value(body: dict[str, Any], key: str) -> Any:
+    """Value of an EV vehicleInfo field such as {"valid": true, "value": "32.0", "unit": "%"}.
+
+    Returns None when the field is missing, flagged invalid, or empty.
+    """
+    node = ev_info(body).get(key)
+    if isinstance(node, dict):
+        if not _ev_node_valid(node):
+            return None
+        node = node.get("value")
+    if node in (None, "", "unknown"):
+        return None
+    return node
+
+
+def ev_unit(body: dict[str, Any], key: str) -> str | None:
+    node = ev_info(body).get(key)
+    if isinstance(node, dict) and node.get("unit"):
+        return str(node["unit"]).strip()
+    return None
+
+
+def ev_flag(body: dict[str, Any], key: str, *, on: tuple[str, ...] = ("1",), off: tuple[str, ...] | None = None) -> bool | None:
+    """Interpret an EV status code. `off=None` means anything not in `on` is off."""
+    value = ev_value(body, key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in on:
+        return True
+    if off is None or text in off:
+        return False
+    return None
+
+
+def ev_total_range(body: dict[str, Any]) -> float | None:
+    total = to_float(ev_value(body, "totalRange"))
+    if total is not None:
+        return total
+    ev_range = to_float(ev_value(body, "evRange"))
+    gas_range = to_float(ev_value(body, "petRange"))
+    if ev_range is None or gas_range is None:
+        return None
+    return ev_range + gas_range
+
+
+def hhmm(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if len(text) == 4 and text.isdigit():
+        return f"{text[:2]}:{text[2:]}"
+    return text or None
+
+
+def parse_compact_utc(value: Any) -> datetime | None:
+    """Parse EV vehicleInfo.updTime, e.g. "20261115161336" (UTC, per the app)."""
+    text = str(value or "").strip()
+    if len(text) != 14 or not text.isdigit():
+        return None
+    try:
+        return datetime.strptime(text, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def parse_iso_datetime(value: Any) -> datetime | None:

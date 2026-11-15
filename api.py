@@ -25,11 +25,14 @@ from .const import (
     CONF_REFRESH_TOKEN,
     CONF_SESSION_ID,
     DASHBOARD_FILTER_SETS,
+    DASHBOARD_MODE_CIG,
+    DASHBOARD_MODE_EV,
     DEFAULT_COUNTRY,
     DEFAULT_LANGUAGE,
     DEFAULT_LOCK_COMMAND,
     DEFAULT_UNLOCK_COMMAND,
     DEVICE_DESCRIPTION,
+    EV_DASHBOARD_PLATFORMS,
     HONDALINK_BUSINESS_ID,
     HONDALINK_SYSTEM_ID,
     HONDA_HEADER_VERSION,
@@ -40,10 +43,23 @@ from .const import (
 
 _DYNAMIC_BACKEND_ERROR_CODE = "0x01130009"
 _INVALID_SCOPE_ERROR_CODE = "0001-01-1150"
+# Gateway "invalid request" rejection. /CIG/dbd/latest returns it when the body
+# does not match the vehicle's platform, e.g. a Clarity sent the CIG body
+# instead of the evInfoRequest body (issue #4).
+_INVALID_REQUEST_ERROR_CODE = "0001-01-1151"
 
 
 class HondaLinkError(Exception):
-    pass
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status: int | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.error_code = error_code
 
 
 class HondaLinkAuthError(HondaLinkError):
@@ -52,6 +68,10 @@ class HondaLinkAuthError(HondaLinkError):
 
 class HondaLinkCommandError(HondaLinkError):
     pass
+
+
+class HondaLinkUnsupportedVehicleError(HondaLinkError):
+    """The dashboard API rejected both the CIG and the EV (Clarity) request for this vehicle."""
 
 
 @dataclass
@@ -76,6 +96,38 @@ def _is_dynamic_backend_error(err: Exception) -> bool:
 def _is_invalid_scope_error(err: Exception) -> bool:
     text = str(err)
     return _INVALID_SCOPE_ERROR_CODE in text or "requested scope is invalid" in text.lower()
+
+
+def _is_invalid_request_error(err: HondaLinkError) -> bool:
+    if err.error_code:
+        return err.error_code == _INVALID_REQUEST_ERROR_CODE
+    return _INVALID_REQUEST_ERROR_CODE in str(err)
+
+
+def _payload_error_code(payload: Any) -> str | None:
+    """Return the gateway error code from any of the envelope shapes Honda uses."""
+    if not isinstance(payload, dict):
+        return None
+    candidates = (
+        payload.get("errorCode"),
+        payload.get("ErrorCode"),
+        (payload.get("responseBody") or {}).get("errorCode") if isinstance(payload.get("responseBody"), dict) else None,
+        (payload.get("Header") or {}).get("ErrorCode") if isinstance(payload.get("Header"), dict) else None,
+    )
+    for code in candidates:
+        if code not in (None, ""):
+            return str(code)
+    return None
+
+
+def telematics_platform(vehicle_info: dict[str, Any] | None) -> str | None:
+    """Return the vehicle record's TelematicsPlatform value (e.g. "MY21"), if any."""
+    if not isinstance(vehicle_info, dict):
+        return None
+    value = vehicle_info.get("TelematicsPlatform")
+    if value is None:
+        return None
+    return str(value).strip() or None
 
 
 def _redact_payload(value: Any) -> Any:
@@ -118,6 +170,7 @@ class HondaLinkAPI:
         session_id: str | None = None,
         lock_command: str = DEFAULT_LOCK_COMMAND,
         unlock_command: str = DEFAULT_UNLOCK_COMMAND,
+        telematics_platform: str | None = None,
     ) -> None:
         self.session = session
         self.email = email
@@ -135,6 +188,27 @@ class HondaLinkAPI:
         self.session_id = session_id or str(uuid.uuid4())
         self.lock_command = lock_command or DEFAULT_LOCK_COMMAND
         self.unlock_command = unlock_command or DEFAULT_UNLOCK_COMMAND
+        self.telematics_platform: str | None = None
+        # Which /CIG/dbd/latest request this vehicle answers; None until known.
+        self.dashboard_mode: str | None = None
+        self.set_telematics_platform(telematics_platform)
+
+    def set_telematics_platform(self, platform: str | None) -> None:
+        self.telematics_platform = (platform or "").strip() or None
+        if self.telematics_platform in EV_DASHBOARD_PLATFORMS:
+            self.dashboard_mode = DASHBOARD_MODE_EV
+
+    @property
+    def ev_dashboard(self) -> bool:
+        return self.dashboard_mode == DASHBOARD_MODE_EV
+
+    def ev_dashboard_body(self) -> dict[str, Any]:
+        """The body the HondaLink app sends for a Clarity (com.honda.common.utils.d1.a)."""
+        if str(self.country).upper() == "CA":
+            units = {"dist": "km", "temp": "C"}
+        else:
+            units = {"dist": "mile", "temp": "F"}
+        return {"evInfoRequest": {"reqType": "all_info", "setUnit": units}}
 
     async def async_register_client(self) -> str:
         data = await self._request_identity(
@@ -219,14 +293,48 @@ class HondaLinkAPI:
         vin = vin or self.vin
         if not vin:
             raise HondaLinkError("VIN is required")
-        data = await self._request_api(
+        if self.dashboard_mode == DASHBOARD_MODE_EV:
+            order = (DASHBOARD_MODE_EV, DASHBOARD_MODE_CIG)
+        else:
+            order = (DASHBOARD_MODE_CIG, DASHBOARD_MODE_EV)
+        rejection: HondaLinkError | None = None
+        for mode in order:
+            try:
+                data = await self._request_dashboard_latest(vin, mode)
+            except HondaLinkAuthError:
+                raise
+            except HondaLinkError as err:
+                # 400 / 0001-01-1151 means this body does not fit the vehicle's
+                # platform; try the other one once before giving up.
+                if err.status == 400 and _is_invalid_request_error(err):
+                    rejection = err
+                    continue
+                raise
+            self.dashboard_mode = mode
+            break
+        else:
+            if rejection is None:
+                raise HondaLinkError("Dashboard request failed")
+            raise HondaLinkUnsupportedVehicleError(
+                str(rejection), status=rejection.status, error_code=rejection.error_code
+            ) from rejection
+        if _lower_status(data.get("status")) != "success":
+            raise HondaLinkError(f"Dashboard request failed: {_redact_payload(data)}")
+        return data
+
+    async def _request_dashboard_latest(self, vin: str, mode: str) -> dict[str, Any]:
+        if mode == DASHBOARD_MODE_EV:
+            return await self._request_api(
+                "POST",
+                f"/REST/NGT/CIG/dbd/latest/{vin}",
+                json_body=self.ev_dashboard_body(),
+                bearer_token_header=True,
+            )
+        return await self._request_api(
             "POST",
             f"/REST/NGT/CIG/dbd/latest/{vin}",
             json_body={"fromDate": "", "toDate": ""},
         )
-        if _lower_status(data.get("status")) != "success":
-            raise HondaLinkError(f"Dashboard request failed: {_redact_payload(data)}")
-        return data
 
     async def async_request_dashboard_update(self, vin: str | None = None) -> HondaLinkCommandResult:
         vin = vin or self.vin
@@ -415,17 +523,18 @@ class HondaLinkAPI:
         *,
         json_body: dict[str, Any] | None = None,
         retry: bool = True,
+        bearer_token_header: bool = False,
     ) -> dict[str, Any]:
         await self.async_ensure_login()
         url = f"{API_BASE}{path}"
-        headers = self._api_headers()
+        headers = self._api_headers(bearer_token_header=bearer_token_header)
         data = await self._send(method, url, headers=headers, json_body=json_body)
 
         error_code = str((data.get("Header") or {}).get("ErrorCode") or "")
         if retry and error_code == "401":
             self.access_token = None
             await self.async_login()
-            headers = self._api_headers()
+            headers = self._api_headers(bearer_token_header=bearer_token_header)
             data = await self._send(method, url, headers=headers, json_body=json_body)
 
         return data
@@ -452,13 +561,22 @@ class HondaLinkAPI:
             except json.JSONDecodeError as err:
                 raise HondaLinkError(f"Invalid JSON from HondaLink: {response.status} {text}") from err
 
+            error_code = _payload_error_code(payload)
             if response.status in (401, 403):
-                raise HondaLinkAuthError(f"HondaLink authorization failed: {_redact_payload(payload)}")
+                raise HondaLinkAuthError(
+                    f"HondaLink authorization failed: {_redact_payload(payload)}",
+                    status=response.status,
+                    error_code=error_code,
+                )
             if response.status >= 400:
-                raise HondaLinkError(f"HondaLink request failed: HTTP {response.status} {_redact_payload(payload)}")
+                raise HondaLinkError(
+                    f"HondaLink request failed: HTTP {response.status} {_redact_payload(payload)}",
+                    status=response.status,
+                    error_code=error_code,
+                )
             return payload
 
-    def _api_headers(self) -> dict[str, str]:
+    def _api_headers(self, *, bearer_token_header: bool = False) -> dict[str, str]:
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Accept": "application/json",
@@ -480,6 +598,9 @@ class HondaLinkAPI:
         if self.hidas_ident:
             headers["hondaHeaderType.userId"] = self.hidas_ident
             headers["hondaHeaderType.hidasId"] = self.hidas_ident
+        if bearer_token_header:
+            # The app's Clarity dashboard client also sends the token in this header.
+            headers["bearerToken"] = self.access_token or ""
         return headers
 
     def _vin(self) -> str:

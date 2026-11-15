@@ -41,6 +41,22 @@ DASHBOARD_FILTER_SETS = (
     [],
 )
 
+# Values of the vehicle record's "TelematicsPlatform" field. These name telematics
+# generations, not model years (a 2025 CR-V reports "MY21").
+#
+# CIG platforms: full dashboard and CIG remote commands. The HondaLink app 5.5.3
+# treats MY21, MY22.5 and MY23 this way.
+CIG_TELEMATICS_PLATFORMS = ("MY21", "MY22.5", "MY23")
+# EV-dashboard platforms: the same /CIG/dbd/latest endpoint, but the app sends an
+# "evInfoRequest" body and reads responseBody.evStatus. Without that body the
+# gateway answers HTTP 400 / 0001-01-1151 (issue #4). 2ZSPHEV = Clarity Plug-In
+# Hybrid (constant TELEMATICS_PLATFORM_CLARITY in the app). CIG remote commands do
+# not apply to these vehicles; the app sends theirs through the older GTC backend.
+EV_DASHBOARD_PLATFORMS = ("2ZSPHEV",)
+
+DASHBOARD_MODE_CIG = "cig"
+DASHBOARD_MODE_EV = "ev"
+
 CLIENT_ID = "HondaLinkAndroidApp0074"
 CLIENT_SECRET = "rETFrZcLyUycsSblksCP"
 DEVICE_DESCRIPTION = "Android"

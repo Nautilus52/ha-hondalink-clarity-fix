@@ -27,7 +27,8 @@
       "vin_required": "No vehicle was discovered. Enter the VIN manually."
     },
     "abort": {
-      "already_configured": "This vehicle is already configured."
+      "already_configured": "This vehicle is already configured.",
+      "unsupported_vehicle": "HondaLink signed in and found {vehicle}, but Honda's dashboard API rejected both the standard and the EV (Clarity) request (TelematicsPlatform: {platform}, error 0001-01-1151). This vehicle's telematics platform is not supported yet. See issue #4 on the project's GitHub page."
     }
   },
   "options": {
@@ -56,7 +57,13 @@
       "rear_right_tire_pressure": {"name": "Rear right tire pressure"},
       "vehicle_speed": {"name": "Vehicle speed"},
       "remote_engine_status": {"name": "Remote engine status"},
-      "last_update": {"name": "Last update"}
+      "last_update": {"name": "Last update"},
+      "battery_level": {"name": "Battery level"},
+      "ev_range": {"name": "EV range"},
+      "gas_range": {"name": "Gas range"},
+      "total_range": {"name": "Total range"},
+      "cabin_temperature": {"name": "Cabin temperature"},
+      "outside_temperature": {"name": "Outside temperature"}
     },
     "binary_sensor": {
       "any_door_open": {"name": "Any door open"},
@@ -65,7 +72,11 @@
       "any_window_open": {"name": "Any window open"},
       "any_light_on": {"name": "Any light on"},
       "warning_lamp_on": {"name": "Warning lamp on"},
-      "remote_engine_running": {"name": "Remote engine running"}
+      "remote_engine_running": {"name": "Remote engine running"},
+      "plugged_in": {"name": "Plugged in"},
+      "charging": {"name": "Charging"},
+      "climate_on": {"name": "Climate on"},
+      "ignition_on": {"name": "Ignition on"}
     },
     "button": {
       "start_engine": {"name": "Start engine"},

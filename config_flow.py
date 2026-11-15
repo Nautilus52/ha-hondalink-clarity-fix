@@ -10,7 +10,13 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import HondaLinkAPI, HondaLinkAuthError, HondaLinkError
+from .api import (
+    HondaLinkAPI,
+    HondaLinkAuthError,
+    HondaLinkError,
+    HondaLinkUnsupportedVehicleError,
+    telematics_platform,
+)
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_CLIENT_REG_KEY,
@@ -162,6 +168,8 @@ class HondaLinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data = {**self._base_data, CONF_VIN: vin, CONF_VEHICLE_INFO: vehicle_info or {}}
                 await self.async_set_unique_id(vin)
                 self._abort_if_unique_id_configured()
+                if unsupported := await self._async_check_supported(self._api, vin, vehicle_info):
+                    return unsupported
                 return self.async_create_entry(
                     title=_vehicle_title(vehicle_info, vin, self._custom_name),
                     data=data,
@@ -181,10 +189,44 @@ class HondaLinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ):
         await self.async_set_unique_id(vin)
         self._abort_if_unique_id_configured()
+        if unsupported := await self._async_check_supported(api, vin, vehicle_info):
+            return unsupported
         return self.async_create_entry(
             title=_vehicle_title(vehicle_info, vin, self._custom_name),
             data=self._entry_data(api, email, password, pin, vin, vehicle_info),
         )
+
+    async def _async_check_supported(
+        self,
+        api: HondaLinkAPI,
+        vin: str,
+        vehicle_info: dict[str, Any] | None,
+    ):
+        """Abort the flow if HondaLink's dashboard API rejects both request types.
+
+        Only that definitive rejection aborts. Any other error (vehicle asleep,
+        gateway hiccup) is left for the coordinator to retry.
+        """
+        api.set_telematics_platform(telematics_platform(vehicle_info))
+        try:
+            await api.async_get_dashboard_latest(vin)
+        except HondaLinkUnsupportedVehicleError as err:
+            platform = telematics_platform(vehicle_info) or "not reported"
+            _LOGGER.warning(
+                "HondaLink vehicle with TelematicsPlatform %s is not served by the CIG API: %s",
+                platform,
+                err,
+            )
+            return self.async_abort(
+                reason="unsupported_vehicle",
+                description_placeholders={
+                    "vehicle": _vehicle_title(vehicle_info, vin),
+                    "platform": platform,
+                },
+            )
+        except HondaLinkError as err:
+            _LOGGER.debug("HondaLink dashboard check during config flow failed: %s", err)
+        return None
 
     def _entry_data(
         self,

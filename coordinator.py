@@ -6,19 +6,45 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import HondaLinkAPI, HondaLinkCommandError, HondaLinkError
-from .const import CONF_SCAN_INTERVAL, CONF_VIN, DEFAULT_SCAN_INTERVAL, DOMAIN
+from .api import (
+    HondaLinkAPI,
+    HondaLinkCommandError,
+    HondaLinkError,
+    HondaLinkUnsupportedVehicleError,
+    telematics_platform,
+)
+from .const import CONF_SCAN_INTERVAL, CONF_VEHICLE_INFO, CONF_VIN, DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def unsupported_vehicle_message(vehicle_info: dict[str, Any] | None) -> str:
+    vehicle_info = vehicle_info or {}
+    platform = telematics_platform(vehicle_info) or "not reported"
+    name = " ".join(
+        str(part)
+        for part in (
+            vehicle_info.get("ModelYear"),
+            vehicle_info.get("ModelGroupNameFriendly") or vehicle_info.get("ModelCode") or "vehicle",
+        )
+        if part
+    )
+    return (
+        f"Honda's dashboard API rejected both the standard and the EV (Clarity) "
+        f"dashboard request for this {name} (TelematicsPlatform: {platform}, error "
+        "0001-01-1151). This vehicle's telematics platform is not supported yet. "
+        "See https://github.com/daviddelahoz/ha-hondalink/issues/4"
+    )
 
 
 class HondaLinkDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry, api: HondaLinkAPI) -> None:
         self.api = api
         self.vin = entry.data[CONF_VIN]
+        self.vehicle_info: dict[str, Any] = entry.data.get(CONF_VEHICLE_INFO) or {}
         interval = int(entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
         super().__init__(
             hass,
@@ -30,10 +56,24 @@ class HondaLinkDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             return await self.api.async_get_dashboard_latest(self.vin)
+        except HondaLinkUnsupportedVehicleError as err:
+            # Permanent: stop Home Assistant from retrying setup forever.
+            _LOGGER.debug("Dashboard request rejected as unsupported: %s", err)
+            raise ConfigEntryError(unsupported_vehicle_message(self.vehicle_info)) from err
         except HondaLinkError as err:
             raise UpdateFailed(str(err)) from err
 
+    @property
+    def ev_dashboard(self) -> bool:
+        """True for vehicles served by the EV (Clarity) dashboard request."""
+        return self.api.ev_dashboard
+
     async def async_force_refresh(self) -> None:
+        if self.ev_dashboard:
+            # The app asks a Clarity for fresh data through the older GTC backend
+            # (RegisterRemoteList), which is not implemented yet. Re-read instead.
+            await self.async_refresh()
+            return
         try:
             await self.api.async_request_dashboard_update(self.vin)
         except HondaLinkCommandError as err:

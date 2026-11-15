@@ -8,11 +8,20 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DATA_COORDINATOR, DOMAIN
 from .entity import HondaLinkEntity
-from .util import dms_to_decimal, get_path, status_body, to_float
+from .util import dms_to_decimal, ev_value, get_path, status_body, to_float
+
+
+def _ev_position(body: dict) -> tuple[float | None, float | None]:
+    # EV dashboard: evStatus.vehicleInfo.curPosLat/curPosLon, "+DD,MM,SS.ss" strings.
+    return dms_to_decimal(ev_value(body, "curPosLat")), dms_to_decimal(ev_value(body, "curPosLon"))
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
+    if coordinator.ev_dashboard and None in _ev_position(status_body(coordinator.data or {})):
+        # The Clarity dashboard did not report a position (Find My Car is a
+        # separate command on these vehicles), so there is nothing to track.
+        return
     async_add_entities([HondaLinkDeviceTracker(coordinator, entry)])
 
 
@@ -29,11 +38,15 @@ class HondaLinkDeviceTracker(HondaLinkEntity, TrackerEntity):
     @property
     def latitude(self) -> float | None:
         body = status_body(self.coordinator.data or {})
+        if self.coordinator.ev_dashboard:
+            return _ev_position(body)[0]
         return dms_to_decimal(get_path(body, "gpsData.coordinate.latitude"))
 
     @property
     def longitude(self) -> float | None:
         body = status_body(self.coordinator.data or {})
+        if self.coordinator.ev_dashboard:
+            return _ev_position(body)[1]
         return dms_to_decimal(get_path(body, "gpsData.coordinate.longitude"))
 
     @property

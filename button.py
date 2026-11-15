@@ -60,7 +60,11 @@ BUTTONS: tuple[HondaLinkButtonDescription, ...] = (
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
-    async_add_entities(HondaLinkButton(coordinator, entry, description) for description in BUTTONS)
+    descriptions = BUTTONS
+    if coordinator.ev_dashboard:
+        # CIG engine/horn/lights commands do not apply to EV-dashboard vehicles (Clarity).
+        descriptions = tuple(description for description in BUTTONS if description.key == "refresh")
+    async_add_entities(HondaLinkButton(coordinator, entry, description) for description in descriptions)
 
 
 class HondaLinkButton(HondaLinkEntity, ButtonEntity):
